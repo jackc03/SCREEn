@@ -1,0 +1,55 @@
+---------------------------------------
+Begin Slurm Prolog: Apr-28-2025 15:03:09
+Job ID:    2543305
+User ID:   jcochran66
+Account:   ece
+Job name:  TrainingFACE
+Partition: coe-gpu
+QOS:       coe-ice
+---------------------------------------
+2025-04-28 15:04:43,886 [INFO] Logging to training_psnr_28-Apr_15-04.log
+Traceback (most recent call last):
+  File "/home/hice1/jcochran66/code/SCREEn/run_screen.py", line 173, in <module>
+    main()
+  File "/home/hice1/jcochran66/code/SCREEn/run_screen.py", line 146, in main
+    for b, (prev720, cur720, next720, hr1080) in enumerate(train_ld, 1):
+                                                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hice1/jcochran66/.conda/envs/sr_design/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 708, in __next__
+    data = self._next_data()
+           ^^^^^^^^^^^^^^^^^
+  File "/home/hice1/jcochran66/.conda/envs/sr_design/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 1480, in _next_data
+    return self._process_data(data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hice1/jcochran66/.conda/envs/sr_design/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 1505, in _process_data
+    data.reraise()
+  File "/home/hice1/jcochran66/.conda/envs/sr_design/lib/python3.12/site-packages/torch/_utils.py", line 733, in reraise
+    raise exception
+AttributeError: Caught AttributeError in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "/home/hice1/jcochran66/.conda/envs/sr_design/lib/python3.12/site-packages/torch/utils/data/_utils/worker.py", line 349, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/hice1/jcochran66/.conda/envs/sr_design/lib/python3.12/site-packages/torch/utils/data/_utils/fetch.py", line 52, in fetch
+    data = [self.dataset[idx] for idx in possibly_batched_index]
+            ~~~~~~~~~~~~^^^^^
+  File "/home/hice1/jcochran66/code/SCREEn/triplet_dataset.py", line 78, in __getitem__
+    return tuple(self._totensor(Image.open(p).convert("RGB"))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/hice1/jcochran66/code/SCREEn/triplet_dataset.py", line 78, in <genexpr>
+    return tuple(self._totensor(Image.open(p).convert("RGB"))
+                 ^^^^^^^^^^^^^^
+AttributeError: 'TripletDataset' object has no attribute '_totensor'. Did you mean: '_to_tensor'?
+
+srun: error: atl1-1-03-012-23-0: task 0: Exited with exit code 1
+---------------------------------------
+Begin Slurm Epilog: Apr-28-2025 15:04:51
+Job ID:        2543305
+User ID:       jcochran66
+Account:       ece
+Job name:      TrainingFACE
+Resources:     cpu=12,gres/gpu:h100=2,mem=264G,node=1
+Rsrc Used:     cput=00:20:36,vmem=0,walltime=00:01:43,mem=37824K,energy_used=0
+Partition:     coe-gpu
+QOS:           coe-ice
+Nodes:         atl1-1-03-012-23-0
+---------------------------------------

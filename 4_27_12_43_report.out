@@ -1,0 +1,43 @@
+---------------------------------------
+Begin Slurm Prolog: Apr-27-2025 00:37:46
+Job ID:    2539697
+User ID:   jcochran66
+Account:   ece
+Job name:  TrainingFACE
+Partition: coe-gpu
+QOS:       coe-ice
+---------------------------------------
+datasets/davis_trainval_2017_720p/DAVIS/JPEGImages/Full-Resolution
+datasets/davis_trainval_2017_1080p/DAVIS/JPEGImages/Full-Resolution
+[001/20]  L1=0.0083  PSNR=40.69 dB
+[002/20]  L1=0.0067  PSNR=40.69 dB
+[003/20]  L1=0.0067  PSNR=40.68 dB
+[004/20]  L1=0.0067  PSNR=40.69 dB
+[005/20]  L1=0.0067  PSNR=40.69 dB
+[006/20]  L1=0.0067  PSNR=40.69 dB
+[007/20]  L1=0.0067  PSNR=40.69 dB
+[008/20]  L1=0.0067  PSNR=40.70 dB
+[009/20]  L1=0.0063  PSNR=42.89 dB
+[010/20]  L1=0.0054  PSNR=43.32 dB
+[011/20]  L1=0.0053  PSNR=43.49 dB
+[012/20]  L1=0.0053  PSNR=43.57 dB
+[013/20]  L1=0.0053  PSNR=43.60 dB
+[014/20]  L1=0.0052  PSNR=43.58 dB
+[015/20]  L1=0.0052  PSNR=43.71 dB
+[016/20]  L1=0.0052  PSNR=43.71 dB
+[017/20]  L1=0.0052  PSNR=43.73 dB
+[018/20]  L1=0.0052  PSNR=43.76 dB
+[019/20]  L1=0.0052  PSNR=43.75 dB
+[020/20]  L1=0.0052  PSNR=43.79 dB
+---------------------------------------
+Begin Slurm Epilog: Apr-27-2025 03:34:44
+Job ID:        2539697
+User ID:       jcochran66
+Account:       ece
+Job name:      TrainingFACE
+Resources:     cpu=12,gres/gpu:h100=2,mem=264G,node=1
+Rsrc Used:     cput=1-11:23:36,vmem=0,walltime=02:56:58,mem=38232K,energy_used=0
+Partition:     coe-gpu
+QOS:           coe-ice
+Nodes:         atl1-1-03-011-18-0
+---------------------------------------
