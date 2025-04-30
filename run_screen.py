@@ -1,172 +1,238 @@
 #!/usr/bin/env python3
 """
-run_screen.py
-=============
-
-Train or evaluate the Three-Frame super-resolution model defined in `screen.py`
-using the DAVIS-2017 720 p / 1080 p folders.
-
-Additions (timestamped logging file):
-  • --log_file is still supported, but whatever you pass (or the default
-    "training_psnr.log") will have "_{DD-Mon_HH-MM}" appended automatically.
+run_screen.py  —  train / test / demo for SCREEn VSR network
 """
 
 from __future__ import annotations
-import argparse, math, logging
+import argparse, logging, math, os, sys, random
 from datetime import datetime
 from pathlib import Path
-import sys, os
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+import torchvision.utils as vutils         # demo helper
 
-# --------------------------------------------------------------------------- #
-#  Local imports
-# --------------------------------------------------------------------------- #
-this_dir = os.path.dirname(os.path.abspath(__file__))
-if this_dir not in sys.path:
-    sys.path.insert(0, this_dir)
+# ───────── distributed init (robust) ───────────────────────────────────────
+if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+    import torch.distributed as dist
+    dist.init_process_group("nccl")
+
+    LOCAL_RANK  = int(os.environ["LOCAL_RANK"])     # 0‥(nproc-1)
+    NUM_VISIBLE = torch.cuda.device_count()         # how many this proc sees
+
+    if LOCAL_RANK >= NUM_VISIBLE:                   # wrap if too few GPUs
+        print(f"[rank{LOCAL_RANK}] only {NUM_VISIBLE} GPU(s) visible; "
+              "wrapping index", file=sys.stderr, flush=True)
+        LOCAL_RANK = LOCAL_RANK % max(1, NUM_VISIBLE)
+
+    torch.cuda.set_device(LOCAL_RANK)
+    WORLD_SIZE = dist.get_world_size()
+else:   # single-GPU / CPU
+    LOCAL_RANK = 0
+    WORLD_SIZE = 1
+
+# ───────── local imports ───────────────────────────────────────────────────
+THIS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(THIS_DIR))
 
 from screen import SCREEn
 from triplet_dataset import TripletDataset
 
-# --------------------------- helper: timestamped name ----------------------- #
-def add_timestamp_to_filename(fname: str | Path) -> str:
-    """Return <stem>_DD-Mon_HH-MM<suffix> in the same directory."""
-    p = Path(fname)
-    ts = datetime.now().strftime("%d-%b_%H-%M")          # e.g. 28-Apr_14-37
+# ───────── helpers ─────────────────────────────────────────────────────────
+def add_timestamp(fname: str | Path) -> str:
+    ts = datetime.now().strftime("%d-%b_%H-%M")
+    p  = Path(fname)
     return str(p.with_name(f"{p.stem}_{ts}{p.suffix or '.log'}"))
 
-# --------------------------- (rest is unchanged) ---------------------------- #
-_Y_COEFFS = torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)  # BT.601
+_YCOEF = torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)
 
 
-def rgb_to_y(x: torch.Tensor) -> torch.Tensor:
-    if x.ndim != 4 or x.size(1) != 3:
-        raise ValueError("rgb_to_y expects (B,3,H,W) tensor in [0,1]")
-    c = _Y_COEFFS.to(x.device, x.dtype)
-    return (x * c).sum(dim=1, keepdim=True)
+def rgb2y(t: torch.Tensor) -> torch.Tensor:
+    return (t * _YCOEF.to(t.device, t.dtype)).sum(1, keepdim=True)
 
 
-def psnr(pred: torch.Tensor, target: torch.Tensor, shave: int = 4) -> float:
-    pred_y, target_y = rgb_to_y(pred), rgb_to_y(target)
+def psnr(pred: torch.Tensor, tgt: torch.Tensor, shave: int = 4) -> float:
+    pred, tgt = rgb2y(pred), rgb2y(tgt)
     if shave:
-        pred_y = pred_y[..., shave:-shave, shave:-shave]
-        target_y = target_y[..., shave:-shave, shave:-shave]
-    mse = F.mse_loss(pred_y, target_y, reduction='mean')
-    return float('inf') if mse == 0 else 10.0 * math.log10(1.0 / mse.item())
+        pred = pred[..., shave:-shave, shave:-shave]
+        tgt  = tgt [..., shave:-shave, shave:-shave]
+    mse = F.mse_loss(pred, tgt, reduction="mean")
+    return float("inf") if mse == 0 else 10 * math.log10(1.0 / mse.item())
 
 
 @torch.no_grad()
 def validate(model, loader, device) -> float:
     model.eval()
-    total_psnr, n = 0.0, 0
-    for prev720, cur720, next720, hr1080 in loader:
-        prev720, cur720, next720, hr1080 = [
-            t.to(device, non_blocking=True)
-            for t in (prev720, cur720, next720, hr1080)
-        ]
-        sr = model(prev720, cur720, next720).clamp(0, 1)
-        total_psnr += psnr(sr, hr1080) * prev720.size(0)
-        n += prev720.size(0)
-    return total_psnr / n
+    tot, n = 0.0, 0
+    for prev, cur, nxt, hr in loader:
+        prev, cur, nxt, hr = [t.to(device, non_blocking=True)
+                              for t in (prev, cur, nxt, hr)]
+        sr = model(prev, cur, nxt).clamp(0, 1)
+        tot += psnr(sr, hr) * prev.size(0)
+        n   += prev.size(0)
+    return tot / n
 
 
+# ───────── main ────────────────────────────────────────────────────────────
 def main() -> None:
-    ap = argparse.ArgumentParser("Train / test Three-Frame SR model.")
-    ap.add_argument("--data_root", default="datasets", type=str)
-    ap.add_argument("--mode", choices=["train", "test"], required=True)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data_root", default="datasets")
+    ap.add_argument("--mode", choices=["train", "test", "demo"], required=True)
     ap.add_argument("--epochs", type=int, default=10)
-    ap.add_argument("--batch_size", type=int, default=4)
+    ap.add_argument("--batch_size", type=int, default=4)   # per GPU
     ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--weights", type=str)
-    ap.add_argument("--save_dir", default="ckpt", type=str)
+    ap.add_argument("--weights")
+    ap.add_argument("--save_dir", default="ckpt")
     ap.add_argument("--num_workers", type=int, default=4)
-    ap.add_argument("--log_file", default="training_psnr.log", type=str,
-                    help="Base name for the log file (timestamp is auto-added)")
+    ap.add_argument("--log_file", default="training_psnr.log")
+    ap.add_argument("--demo_samples", type=int, default=3)
     args = ap.parse_args()
 
-    # ------------------------------- logging -------------------------------- #
-    log_path = add_timestamp_to_filename(args.log_file)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.FileHandler(log_path, mode="a"),
-                  logging.StreamHandler(sys.stdout)],
-    )
-    logging.info("Logging to %s", log_path)
+    # ---------- logging ----------------------------------------------------
+    if LOCAL_RANK == 0:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            handlers=[logging.FileHandler(add_timestamp(args.log_file), "a"),
+                      logging.StreamHandler(sys.stdout)]
+        )
 
-    # (… everything else exactly the same as the previous version …)
-    # ----------------------------------------------------------------------- #
-    root = Path(args.data_root)
-    lr_dir = root / "davis_trainval_2017_720p" / "DAVIS" / "JPEGImages" / "Full-Resolution"
+    # ---------- paths ------------------------------------------------------
+    root   = Path(args.data_root)
+    lr_dir = root / "davis_trainval_2017_480p"  / "DAVIS" / "JPEGImages" / "Full-Resolution"
     hr_dir = root / "davis_trainval_2017_1080p" / "DAVIS" / "JPEGImages" / "Full-Resolution"
-
     if not (lr_dir.exists() and hr_dir.exists()):
-        raise SystemExit(f"Could not find DAVIS folders under {root}")
+        raise SystemExit("DAVIS folders not found")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # ---------- model ------------------------------------------------------
+    device = torch.device("cuda", LOCAL_RANK) if torch.cuda.is_available() else torch.device("cpu")
     torch.backends.cudnn.benchmark = True
-
     model = SCREEn().to(device)
     if args.weights:
-        model.load_state_dict(torch.load(args.weights, map_location=device))
-        logging.info("Loaded weights from %s", args.weights)
+        map_loc = {"cuda:0": f"cuda:{LOCAL_RANK}"}
+        model.load_state_dict(torch.load(args.weights, map_location=map_loc))
+        if LOCAL_RANK == 0:
+            logging.info("Loaded weights from %s", args.weights)
 
+    if WORLD_SIZE > 1:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[LOCAL_RANK], output_device=LOCAL_RANK)
+
+    # ---------- datasets & loaders (unchanged) -----------------------------
+    train_set = TripletDataset(lr_dir, hr_dir, "train")
+    val_set   = TripletDataset(lr_dir, hr_dir, "val")
+    test_set  = TripletDataset(lr_dir, hr_dir, "test")
+
+    train_sam = DistributedSampler(train_set, shuffle=True)  if WORLD_SIZE > 1 else None
+    val_sam   = DistributedSampler(val_set,   shuffle=False) if WORLD_SIZE > 1 else None
+    test_sam  = DistributedSampler(test_set,  shuffle=False) if WORLD_SIZE > 1 else None
+
+    train_ld = DataLoader(train_set, args.batch_size, sampler=train_sam,
+                          shuffle=train_sam is None,
+                          num_workers=args.num_workers, pin_memory=True)
+    val_ld   = DataLoader(val_set, 1, sampler=val_sam, shuffle=False,
+                          num_workers=args.num_workers, pin_memory=True)
+    test_ld  = DataLoader(test_set, 1, sampler=test_sam, shuffle=False,
+                          num_workers=args.num_workers, pin_memory=True)
+
+    # ---------- test mode --------------------------------------------------
     if args.mode == "test":
-        test_ld = DataLoader(
-            TripletDataset(lr_dir, hr_dir, "test"),
-            batch_size=1, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True
-        )
-        avg_psnr = validate(model, test_ld, device)
-        logging.info("Test-set PSNR: %.2f dB", avg_psnr)
-        print(f"Test-set PSNR: {avg_psnr:.2f} dB")
+        psnr_val = validate(model, test_ld, device)
+        if LOCAL_RANK == 0:
+            print(f"Test PSNR: {psnr_val:.2f} dB")
         return
 
-    train_ld = DataLoader(
-        TripletDataset(lr_dir, hr_dir, "train"),
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=torch.cuda.is_available()
-    )
-    val_ld = DataLoader(
-        TripletDataset(lr_dir, hr_dir, "val"),
-        batch_size=1, shuffle=False,
-        num_workers=args.num_workers, pin_memory=torch.cuda.is_available()
-    )
+    # ---------- demo mode  (visual comparison)  --------------------------- #
+    if args.mode == "demo":
+        if LOCAL_RANK == 0:
+            out_dir = Path("demo_out")
+            out_dir.mkdir(exist_ok=True)
+            model.eval()
+            samples = random.sample(range(len(test_set)), args.demo_samples)
+            logging.info("Demo samples: %s", samples)
 
+            PATCH = 100
+            H, W  = 1080, 1920          # HR frame size
+
+            for idx in samples:
+                prev, cur, nxt, hr = test_set[idx]
+
+                with torch.no_grad():
+                    sr = model(prev.unsqueeze(0).to(device),
+                            cur .unsqueeze(0).to(device),
+                            nxt .unsqueeze(0).to(device)).cpu()[0].clamp(0, 1)
+                bilinear = F.interpolate(cur.unsqueeze(0), (H, W),
+                                        mode="bilinear", align_corners=False)[0]
+
+                rows = []               # will hold 4 concatenated rows
+                for p in range(4):
+                    y = random.randint(0, H - PATCH)
+                    x = random.randint(0, W - PATCH)
+
+                    crop_bi  = bilinear[:, y:y+PATCH, x:x+PATCH]
+                    crop_sr  = sr      [:, y:y+PATCH, x:x+PATCH]
+                    crop_gt  = hr      [:, y:y+PATCH, x:x+PATCH]
+
+                    # row = [bilinear | network | GT]
+                    row = torch.cat([crop_bi, crop_sr, crop_gt], dim=2)
+                    rows.append(row)
+
+                    # per-patch PSNR
+                    b_psnr = psnr(crop_bi.unsqueeze(0), crop_gt.unsqueeze(0), shave=0)
+                    s_psnr = psnr(crop_sr.unsqueeze(0), crop_gt.unsqueeze(0), shave=0)
+                    logging.info("Sample %d patch %d  bil %.2f dB  net %.2f dB",
+                                idx, p, b_psnr, s_psnr)
+
+                grid = torch.cat(rows, dim=1)          # stack rows vertically
+                vutils.save_image(grid, out_dir / f"demo_{idx:04d}.png")
+                print(f"Saved demo_{idx:04d}.png")
+
+        return
+
+    # ---------- optimiser --------------------------------------------------
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    os.makedirs(args.save_dir, exist_ok=True)
+    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
 
+    # ======================  TRAIN  ========================================
     for epoch in range(1, args.epochs + 1):
+        if train_sam:
+            train_sam.set_epoch(epoch)
+
         model.train()
         epoch_loss = 0.0
 
-        for b, (prev720, cur720, next720, hr1080) in enumerate(train_ld, 1):
-            prev720, cur720, next720, hr1080 = [
-                t.to(device, non_blocking=True)
-                for t in (prev720, cur720, next720, hr1080)
-            ]
+        for b, (prev, cur, nxt, hr) in enumerate(train_ld, 1):
+            prev, cur, nxt, hr = [t.to(device, non_blocking=True) for t in (prev, cur, nxt, hr)]
             opt.zero_grad(set_to_none=True)
-            sr = model(prev720, cur720, next720)
-            loss = F.l1_loss(sr, hr1080)
+            sr   = model(prev, cur, nxt)
+            loss = F.l1_loss(sr, hr)
             loss.backward()
             opt.step()
 
-            epoch_loss += loss.item() * prev720.size(0)
+            epoch_loss += loss.item() * prev.size(0)
 
-            batch_psnr = psnr(sr.clamp(0, 1), hr1080)
-            logging.info("Epoch %d  Batch %d/%d  PSNR %.2f dB",
-                         epoch, b, len(train_ld), batch_psnr)
+            # batch-level logging (rank-0)
+            if LOCAL_RANK == 0:
+                batch_psnr = psnr(sr.detach().clamp(0,1), hr)
+                logging.info("Ep %d  Bt %d/%d  L1 %.4f  PSNR %.2f",
+                             epoch, b, len(train_ld), loss.item(), batch_psnr)
 
-        epoch_loss /= len(train_ld.dataset)
-        val_psnr = validate(model, val_ld, device)
-        logging.info("Epoch %d  VALIDATE  PSNR %.2f dB", epoch, val_psnr)
-        print(f"[{epoch:03d}/{args.epochs}]  L1={epoch_loss:.4f}  PSNR={val_psnr:.2f} dB")
+        if WORLD_SIZE > 1:
+            loss_tensor = torch.tensor(epoch_loss, device=device)
+            dist.all_reduce(loss_tensor)
+            epoch_loss = loss_tensor.item()
+        epoch_loss /= len(train_set)
 
-        torch.save(model.state_dict(),
-                   Path(args.save_dir) / f"epoch_{epoch:03d}.pt")
+        psnr_val = validate(model, val_ld, device)
+        if LOCAL_RANK == 0:
+            logging.info("Epoch %d | L1 %.4f | PSNR %.2f", epoch, epoch_loss, psnr_val)
+            torch.save(model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
+                       Path(args.save_dir) / f"epoch_{epoch:03d}.pt")
+
+    if LOCAL_RANK == 0:
+        logging.info("Finished training.")
 
 
 if __name__ == "__main__":

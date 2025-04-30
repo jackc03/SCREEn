@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ────────────────── Conv-GRU Cell ───────────────────────────────────────────
+# ───── Conv-GRU Cell ───────────────────────────────────────────────────────
 class ConvGRUCell(nn.Module):
     def __init__(self, in_c: int, hid_c: int, ks: int = 3):
         super().__init__()
@@ -23,58 +23,56 @@ class ConvGRUCell(nn.Module):
         return (1 - z) * h + z * n
 
 
-# ────────────────── GRU Stack helper ────────────────────────────────────────
+# ───── GRU Stack helper ────────────────────────────────────────────────────
 class RecConvStack(nn.Module):
     def __init__(self, in_c: int, hid_list):
         super().__init__()
-        layers, prev = [], in_c
+        cells, prev = [], in_c
         for hid in hid_list:
-            layers.append(ConvGRUCell(prev, hid))
+            cells.append(ConvGRUCell(prev, hid))
             prev = hid
-        self.cells = nn.ModuleList(layers)
+        self.cells = nn.ModuleList(cells)
 
     def forward(self, x):
         for cell in self.cells:
-            x = cell(x, None)      # no temporal loop ⇒ h=None each call
+            x = cell(x, None)
         return x
 
 
-# ────────────────── Full Network ────────────────────────────────────────────
+# ───── Full Network ────────────────────────────────────────────────────────
 class SCREEn(nn.Module):
+    """
+    480 p (854×480) → 1080 p (1920×1080) super-resolution.
+    """
     def __init__(self, stem_c: int = 16):
         super().__init__()
 
         self.stem = nn.Sequential(
-            nn.Conv2d(9, stem_c, 3, 1, 1),
-            nn.ReLU(True)
+            nn.Conv2d(9, stem_c, 3, 1, 1), nn.ReLU(True)
         )
 
-        self.rec720  = RecConvStack(stem_c, [32, 32, 32])
-        self.rec1080 = RecConvStack(32,     [32, 32, 16, 16])
+        self.rec480  = RecConvStack(stem_c, [32, 32, 64])   # was rec720
+        self.rec1080 = RecConvStack(64,     [128, 128, 64, 32])
 
         self.head = nn.Sequential(
-            nn.Conv2d(16, 32, 1), nn.ReLU(True),
+            nn.Conv2d(32, 64, 1), nn.ReLU(True),
+            nn.Conv2d(64, 32, 1), nn.ReLU(True),
             nn.Conv2d(32, 16, 1), nn.ReLU(True),
             nn.Conv2d(16,  3, 1)
         )
 
-    # ---------------------- forward with assertions -------------------------
     def forward(self, prev, curr, nxt):
-        x = torch.cat([prev, curr, nxt], 1)               # (B,9,720,1280)
-        assert x.shape[1] == 9, "concatenation produced wrong channel count"
+        # concat → (B, 9, 480, 854)
+        x = torch.cat([prev, curr, nxt], 1)
+        assert x.shape[-2:] == (480, 854), "input must be 854×480"
 
-        feat720 = self.rec720(self.stem(x))               # (B,32,720,1280)
-        assert feat720.shape[1] == 32, "rec720 output ≠ 32 channels"
+        feat480 = self.rec480(self.stem(x))                 # (B,32,480,854)
 
-        feat1080 = F.interpolate(feat720, (1080, 1920), mode='bilinear',
+        feat1080 = F.interpolate(feat480, (1080, 1920), mode='bilinear',
                                  align_corners=False)
-        assert feat1080.shape[1] == 32, "upsample kept wrong channel count"
-
-        feat1080 = self.rec1080(feat1080)                 # (B,16,1080,1920)
-        assert feat1080.shape[1] == 16, "rec1080 output ≠ 16 channels"
+        feat1080 = self.rec1080(feat1080)                   # (B,16,1080,1920)
 
         up_ref = F.interpolate(curr, (1080, 1920), mode='bilinear',
                                align_corners=False)
 
-        out = up_ref + self.head(feat1080)
-        return out.clamp(0.0, 1.0)
+        return (up_ref + self.head(feat1080)).clamp(0, 1)

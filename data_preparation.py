@@ -17,7 +17,7 @@ from pathlib import Path
 from multiprocessing.pool import ThreadPool
 from PIL import Image
 
-TARGET_SIZE = (1280, 720)        # (width, height) for 720p
+TARGET_SIZE = (854, 480)        # (width, height) for 720p
 # TARGET_SIZE = (1920, 1080)        # (width, height) for 720p
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif"}

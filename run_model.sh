@@ -15,5 +15,6 @@ module load cuda/11.8
 module load anaconda3
 conda activate sr_design
 
-
-srun python run_screen.py --mode="train" --epochs=10 --batch_size=16 --num_workers=4
+nvidia-smi
+srun --exclusive torchrun --nproc_per_node 2 run_screen.py --mode="train" --epochs=10 --batch_size=1 --num_workers=6
+# srun --exclusive torchrun --nproc_per_node 2 run_screen.py --mode="demo" --demo_samples=10 --weights ckpt/epoch_003.pt --num_workers=6

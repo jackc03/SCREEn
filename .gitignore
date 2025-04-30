@@ -1,2 +1,3 @@
 ckpt/**
 datasets/**
+__pycache__/**
