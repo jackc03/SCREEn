@@ -51,24 +51,24 @@ class SCREEn(nn.Module):
             nn.Conv2d(9, stem_c, 3, 1, 1), nn.ReLU(True)
         )
 
-        self.rec480  = RecConvStack(stem_c, [32, 32, 64])   # was rec720
-        self.rec1080 = RecConvStack(64,     [128, 128, 64, 32])
+        # self.rec480  = RecConvStack(stem_c, [32, 32, 64])   # was rec720
+        self.rec1080 = RecConvStack(9,     [16, 32, 64, 64, 32])
 
         self.head = nn.Sequential(
-            nn.Conv2d(32, 64, 1), nn.ReLU(True),
-            nn.Conv2d(64, 32, 1), nn.ReLU(True),
+            nn.Conv2d(32, 32, 1), nn.ReLU(True),
             nn.Conv2d(32, 16, 1), nn.ReLU(True),
+            nn.Conv2d(16, 16, 1), nn.ReLU(True),
             nn.Conv2d(16,  3, 1)
         )
 
     def forward(self, prev, curr, nxt):
         # concat → (B, 9, 480, 854)
         x = torch.cat([prev, curr, nxt], 1)
-        assert x.shape[-2:] == (480, 854), "input must be 854×480"
+        assert x.shape[-2:] == (480, 854), "input must be 854x480"
 
-        feat480 = self.rec480(self.stem(x))                 # (B,32,480,854)
+        # feat480 = self.rec480(self.stem(x))                 # (B,32,480,854)
 
-        feat1080 = F.interpolate(feat480, (1080, 1920), mode='bilinear',
+        feat1080 = F.interpolate(x, (1080, 1920), mode='bilinear',
                                  align_corners=False)
         feat1080 = self.rec1080(feat1080)                   # (B,16,1080,1920)
 
